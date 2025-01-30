@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <provider>
-    <id>yettelbank-rs</id>
-    <company>15953</company>
+    <id>otpbank-rs</id>
+    <company>15973</company>
     <description>
-        Use your login and password from online.mobibanka.rs/
+        Use your login and mToken from OTP Banka app
     </description>
     <version>1.0</version>
     <build>1</build>

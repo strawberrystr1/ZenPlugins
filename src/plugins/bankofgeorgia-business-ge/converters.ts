@@ -66,7 +66,8 @@ export function convertToZenMoneyTransaction (record: AccountRecord, allRecords:
   }
 
   switch (record.DocumentProductGroup) {
-    case 'PMI':
+    case 'PMD': // Transfer of a national currency
+    case 'PMI': // Transfer of a foreign currency
       if (record.EntryAmount < 0) {
         // bank transfer outgoing
         transaction.movements.push(
@@ -105,12 +106,6 @@ export function convertToZenMoneyTransaction (record: AccountRecord, allRecords:
       // commission or fee
       transaction.movements[0].fee = (transaction.movements[0].sum != null) ? -transaction.movements[0].sum : 0
       transaction.movements[0].sum = 0
-      break
-
-    case 'PMD': // outgoing transfer (for example to treasury)
-      transaction.movements.push(
-        createCounterpartyMovement(record, record.EntryAmountDebit)
-      )
       break
 
     case 'TRN': // card payment

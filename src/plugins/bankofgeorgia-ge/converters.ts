@@ -1,7 +1,28 @@
-import { Account, AccountType, ExtendedTransaction, Merchant, Movement } from '../../types/zenmoney'
+import { Account, AccountType, ExtendedTransaction, Merchant, Movement, Amount } from '../../types/zenmoney'
 import { ConvertedAccount, ConvertedProduct, FetchedAccount, ConvertedLoan } from './models'
 import { getArray, getNumber, getOptNumber, getOptString, getString } from '../../types/get'
 import { getIntervalBetweenDates } from '../../common/momentDateUtils'
+
+export function getAmountFromDescription (description: string | undefined): Amount | null {
+  if (description == null || description === undefined) {
+    return null
+  }
+
+  const amountAndInstrumentRegexp = /([A-Z]{3})([0-9,]+[0-9]+\.[0-9]{2})/g
+  const found = description.match(amountAndInstrumentRegexp)
+  if (found != null) {
+    const normalizedSum = found[0].slice(3).replace(',', '')
+    const sum = parseFloat(normalizedSum)
+    const instrument = found[0].slice(0, 3)
+    return { sum, instrument }
+  }
+  return null
+}
+
+function getSignByPrintFormType (printFormType: string): number {
+  const expensePrintFormTypes = ['UTILITY_PAYMENT', 'PAYMENT', 'OUT_TRANSFER', 'CASH_WITHDRAWAL', 'OTHER']
+  return expensePrintFormTypes.includes(printFormType) ? -1 : 1
+}
 
 function invertMovement (movement: Movement, account: Account, invertedAccount: { id?: string, type?: AccountType, companyId?: string }): Movement {
   const sum = movement.invoice != null ? movement.invoice.sum : movement.sum
@@ -124,6 +145,7 @@ function convertLoan (apiAccount: FetchedAccount): ConvertedLoan {
 
 export function convertTransaction (apiTransaction: unknown, product: ConvertedProduct): ExtendedTransaction | null {
   const printFormType = getString(apiTransaction, 'printFormType')
+  const entryType = getString(apiTransaction, 'entryType')
   const entryGroupDKey = getString(apiTransaction, 'entryGroupDKey')
   const instrument = getString(apiTransaction, 'ccy')
   let date = new Date(getNumber(apiTransaction, 'inpSysdate'))
@@ -150,10 +172,13 @@ export function convertTransaction (apiTransaction: unknown, product: ConvertedP
     comment: null
   }
 
+  const cashAmount = getAmountFromDescription(getString(apiTransaction, 'nomination'))
+
   switch (printFormType) {
     case 'UTILITY_PAYMENT':
     case 'PAYMENT': {
       const title: string | undefined = getOptString(apiTransaction, 'merchantNameInt')
+      transaction.movements[0].invoice = cashAmount ? { sum: cashAmount.sum * getSignByPrintFormType(printFormType), instrument: cashAmount.instrument } : null
       if (title !== undefined) {
         transaction.merchant = parseMerchant(title, getString(apiTransaction, 'nominationOriginal'))
       } else {
@@ -188,31 +213,53 @@ export function convertTransaction (apiTransaction: unknown, product: ConvertedP
       }
       break
     }
-    case 'CASH_DEPOSIT':
-    case 'CASH_WITHDRAWAL': {
+    case 'CASH_DEPOSIT': {
+      const title: string | undefined = getOptString(apiTransaction, 'merchantNameInt') ?? getOptString(apiTransaction, 'beneficiary')
+      if (title !== undefined) {
+        transaction.merchant = parseMerchant(title, getString(apiTransaction, 'nominationOriginal'))
+      }
+      transaction.movements[0].invoice = cashAmount ? { sum: cashAmount.sum * getSignByPrintFormType(printFormType), instrument: cashAmount.instrument } : null
       transaction.movements.push(
         invertMovement(transaction.movements[0], product.account, { type: AccountType.cash })
       )
+      const nominationOriginal = getOptString(apiTransaction, 'nominationOriginal')
+      transaction.comment = nominationOriginal ?? 'Cash deposit'
+      break
+    }
+    case 'CASH_WITHDRAWAL': {
+      const title: string | undefined = getOptString(apiTransaction, 'merchantNameInt') ?? getOptString(apiTransaction, 'beneficiary')
+      if (title !== undefined) {
+        transaction.merchant = parseMerchant(title, getString(apiTransaction, 'nominationOriginal'))
+      }
+
+      if (entryType === 'COM') { // cash withdrawal fee
+        transaction.comment = 'Cash withdrawal comission / ' + getString(apiTransaction, 'nominationOriginal')
+      } else {
+        transaction.comment = 'Cash withdrawal'
+        transaction.movements[0].invoice = cashAmount ? { sum: cashAmount.sum * getSignByPrintFormType(printFormType), instrument: cashAmount.instrument } : null
+        transaction.movements.push(
+          invertMovement(transaction.movements[0], product.account, { type: AccountType.cash })
+        )
+      }
       break
     }
     case 'OTHER': {
       switch (entryGroupDKey) {
         case 'text.entry.group.name.widthroval': {
-          if (getString(apiTransaction, 'entryType') === 'COM') { // cash withdrawal fee
+          if (entryType === 'COM') { // cash withdrawal fee
             transaction.comment = 'cash withdrawal fee'
             break
           }
-          const amountMatch = getString(apiTransaction, 'nomination').match(/W?w?ithdrawal - A?a?mount: ([A-Z]+)([\d.,]*);/)
-          assert(amountMatch != null, 'cant parse withdrawal amount', apiTransaction)
-          const cashAmount = { sum: parseFloat(amountMatch[2].replace(',', '')), instrument: amountMatch[1] }
           const txAmount = getNumber(apiTransaction, 'amount')
-          if (cashAmount.instrument !== product.account.instrument) {
-            transaction.movements[0].invoice = { sum: -cashAmount.sum, instrument: cashAmount.instrument }
-            transaction.movements[0].sum = -txAmount
-          } else {
-            const fee = txAmount - cashAmount.sum
-            transaction.movements[0].sum = -(txAmount - fee)
-            transaction.movements[0].fee = fee !== 0 ? -Math.abs(Math.round(fee * 100) / 100) : 0
+          if (cashAmount) {
+            if (cashAmount.instrument !== product.account.instrument) {
+              transaction.movements[0].invoice = { sum: -cashAmount.sum, instrument: cashAmount.instrument }
+              transaction.movements[0].sum = -txAmount
+            } else {
+              const fee = txAmount - cashAmount.sum
+              transaction.movements[0].sum = -(txAmount - fee)
+              transaction.movements[0].fee = fee !== 0 ? -Math.abs(Math.round(fee * 100) / 100) : 0
+            }
           }
           transaction.movements.push(
             invertMovement(transaction.movements[0], product.account, { type: AccountType.cash })
@@ -221,6 +268,7 @@ export function convertTransaction (apiTransaction: unknown, product: ConvertedP
           if (title !== undefined) {
             transaction.merchant = parseMerchant(title, getString(apiTransaction, 'nominationOriginal'))
           }
+          transaction.comment = 'Cash withdrawal'
           break
         }
         case 'text.entry.group.name.FEE': {
